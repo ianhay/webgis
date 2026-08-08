@@ -48,9 +48,14 @@ svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 
 /* ---------- Sidebar ---------- */
 #sidebar{
-  width:var(--sidebar-width);min-width:var(--sidebar-width);background:var(--ih-sidebar);border-right:1px solid var(--ih-border);
-  display:flex;flex-direction:column;z-index:20;transition:transform .25s ease;
+  width:var(--sidebar-width);min-width:220px;max-width:560px;background:var(--ih-sidebar);border-right:1px solid var(--ih-border);
+  display:flex;flex-direction:column;z-index:20;position:relative;transition:transform .25s ease;
 }
+.sidebar-resizer{
+  position:absolute;top:0;right:-3px;width:6px;height:100%;cursor:col-resize;z-index:25;
+  background:transparent;
+}
+.sidebar-resizer:hover,.sidebar-resizer.is-dragging{background:var(--ih-primary);opacity:.35;}
 .brand{
   display:flex;align-items:center;justify-content:space-between;padding:14px 16px;
   border-bottom:1px solid var(--ih-divider);
@@ -132,6 +137,8 @@ html[data-theme="light"] .icon-moon{display:block;}
 .layer-row.active{border-color:var(--ih-primary);background:var(--ih-surface-selected);}
 .layer-row.hidden-layer{opacity:.55;}
 .layer-row .swatch{width:12px;height:12px;border-radius:3px;flex-shrink:0;}
+.swatch-group{display:flex;gap:2px;flex-shrink:0;}
+.swatch-group span{display:block;width:6px;height:13px;border-radius:2px;}
 .layer-row .name{flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .layer-row .actions{display:flex;gap:1px;}
 .layer-row button{
@@ -248,8 +255,12 @@ html[data-theme="light"] .icon-moon{display:block;}
 .modal-actions{display:flex;justify-content:flex-end;gap:8px;}
 .modal-actions .tool{flex:none;height:36px;}
 
-/* ---------- Toasts ---------- */
-.toast-root{position:fixed;right:16px;top:16px;z-index:120;display:flex;flex-direction:column;gap:8px;}
+/* ---------- Photo lightbox ---------- */
+.lightbox-root{position:fixed;inset:0;z-index:110;display:flex;align-items:center;justify-content:center;padding:24px;}
+.lightbox-scrim{position:absolute;inset:0;background:rgba(6,9,13,0.82);}
+.lightbox-img{position:relative;max-width:100%;max-height:100%;border-radius:4px;box-shadow:var(--ih-shadow-float);cursor:zoom-out;object-fit:contain;}
+
+/* ---------- Toasts ---------- */.toast-root{position:fixed;right:16px;top:16px;z-index:120;display:flex;flex-direction:column;gap:8px;}
 .toast{
   background:var(--ih-surface);border:1px solid var(--ih-border);border-left:3px solid var(--ih-primary);
   border-radius:4px;padding:10px 14px;font-size:13px;color:var(--ih-text);box-shadow:var(--ih-shadow-card);
@@ -278,6 +289,7 @@ html[data-theme="light"] .icon-moon{display:block;}
   .table-panel{left:0;}
   .status-bar{left:8px;bottom:64px;font-size:11px;}
   .table-toggle-fab{right:8px;bottom:8px;}
+  .sidebar-resizer{display:none;}
   /* Keep dialogs (including anything with a text field) clear of the
      on-screen keyboard, which covers the lower half of a mobile viewport. */
   .modal-root{align-items:flex-start;padding-top:8vh;}

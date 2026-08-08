@@ -2,16 +2,23 @@
    WebGIS Studio — Main Application Script
    =========================================================== */
 
-const APP_VERSION = '2.0.0';
-const APP_NAME = 'WebGIS Studio';
+const APP_VERSION = '2.1.0';
+const APP_NAME = 'WebGIS';
 console.log(`%c${APP_NAME} v${APP_VERSION}`, 'font-weight:600;color:#24529A;');
 
 const COLORS = ['#24529A', '#D87822', '#3E745A', '#5D78A4', '#B88A2A', '#B34F4A', '#7EA8F2'];
 let colorIdx = 0;
 function nextColor() { return COLORS[(colorIdx++) % COLORS.length]; }
 
+const ICON_EYE_OPEN = '<svg viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+const ICON_EYE_CLOSED = '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 10.6a3 3 0 0 0 4.2 4.2M9.9 5.1A11 11 0 0 1 12 5c7 0 11 7 11 7a13.5 13.5 0 0 1-3.1 3.8M6.6 6.6A13.4 13.4 0 0 0 1 12s4 7 11 7a10.4 10.4 0 0 0 5.4-1.5"/></svg>';
+const ICON_ZOOM = '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>';
+const ICON_DELETE = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M6 18L18 6"/></svg>';
+const ICON_DOWNLOAD = '<svg viewBox="0 0 24 24"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>';
+
 const state = {
   layers: [],
+  rasterLayers: [],
   activeLayerId: null,
   selectedFeatureId: null,
   isTableVisible: false,
@@ -32,11 +39,12 @@ const els = {
   drawToolbar: document.getElementById('drawToolbar'),
   stylePanel: document.getElementById('stylePanel'),
   styleEmptyState: document.getElementById('styleEmptyState'),
-  styleColor: document.getElementById('styleColor'),
+  stylePointColor: document.getElementById('stylePointColor'),
+  styleLineColor: document.getElementById('styleLineColor'),
+  styleFillColor: document.getElementById('styleFillColor'),
   styleWidth: document.getElementById('styleWidth'),
   styleOpacity: document.getElementById('styleOpacity'),
   labelField: document.getElementById('labelField'),
-  expGeoPackage: document.getElementById('expGeoPackage'),
   printPdfBtn: document.getElementById('printPdfBtn'),
   toggleTableBtn: document.getElementById('toggleTableBtn'),
   tablePanel: document.getElementById('tablePanel'),
@@ -53,6 +61,7 @@ const els = {
   bufferBtn: document.getElementById('bufferBtn'),
   clipBtn: document.getElementById('clipBtn'),
   clipMaskSelect: document.getElementById('clipMaskSelect'),
+  rasterLayerList: document.getElementById('rasterLayerList'),
   saveProjectBtn: document.getElementById('saveProjectBtn'),
   openProjectBtn: document.getElementById('openProjectBtn'),
   projectInput: document.getElementById('projectInput'),
@@ -168,6 +177,20 @@ function openModal({ title, message, withField = false, fieldValue = '', fieldPl
 }
 modalScrim.addEventListener('click', () => { modalRoot.hidden = true; });
 
+/* -----------------------------------------------------------
+   Photo lightbox — in-page full-size viewer for popup thumbnails.
+   Replaces window.open(dataURL): several mobile browsers (iOS Safari
+   in particular) refuse to navigate a new tab to a data: URL and
+   just show a blank page, which is what was happening before.
+----------------------------------------------------------- */
+const lightboxRoot = document.getElementById('lightboxRoot');
+const lightboxImg = document.getElementById('lightboxImg');
+function openImageLightbox(url) { lightboxImg.src = url; lightboxRoot.hidden = false; }
+function closeImageLightbox() { lightboxRoot.hidden = true; lightboxImg.src = ''; }
+document.getElementById('lightboxScrim').addEventListener('click', closeImageLightbox);
+lightboxImg.addEventListener('click', closeImageLightbox);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !lightboxRoot.hidden) closeImageLightbox(); });
+
 const modalConfirm = (title, message, opts = {}) => openModal({ title, message, confirmLabel: opts.confirmLabel || 'Confirm', cancelLabel: opts.cancelLabel || 'Cancel', danger: opts.danger });
 const modalPrompt = (title, message, fieldValue = '', opts = {}) => openModal({ title, message, withField: true, fieldValue, fieldPlaceholder: opts.placeholder || '', confirmLabel: opts.confirmLabel || 'OK', cancelLabel: 'Cancel' });
 const modalAlert = (title, message) => openModal({ title, message, confirmLabel: 'OK', cancelLabel: null });
@@ -185,6 +208,30 @@ if (els.mobileMenuToggle && els.sidebar) {
       els.sidebar.classList.remove('mobile-open');
     }
   });
+}
+
+/* -----------------------------------------------------------
+   Sidebar resize (desktop) — drag the handle on the right edge.
+   Disabled on mobile via CSS (the sidebar is a drawer there instead).
+----------------------------------------------------------- */
+const sidebarResizer = document.getElementById('sidebarResizer');
+if (sidebarResizer) {
+  let resizing = false;
+  sidebarResizer.addEventListener('pointerdown', (e) => {
+    if (window.innerWidth <= 900) return;
+    resizing = true;
+    sidebarResizer.classList.add('is-dragging');
+    sidebarResizer.setPointerCapture(e.pointerId);
+  });
+  sidebarResizer.addEventListener('pointermove', (e) => {
+    if (!resizing) return;
+    const width = Math.min(560, Math.max(220, e.clientX));
+    document.documentElement.style.setProperty('--sidebar-width', `${width}px`);
+    map.resize();
+  });
+  const stopResizing = () => { resizing = false; sidebarResizer.classList.remove('is-dragging'); };
+  sidebarResizer.addEventListener('pointerup', stopResizing);
+  sidebarResizer.addEventListener('pointercancel', stopResizing);
 }
 
 /* -----------------------------------------------------------
@@ -269,6 +316,13 @@ map.addControl(draw);
 
 const activePopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true });
 
+// Larger hit-test tolerance on touch devices — a 5px box around a fingertip
+// tap is usually a miss, which is why popups felt broken on mobile while
+// working fine with a mouse. A plain click event carries no pointer-type
+// info, so we track it from the most recent pointerdown instead.
+let lastPointerWasTouch = false;
+map.getCanvasContainer().addEventListener('pointerdown', (e) => { lastPointerWasTouch = e.pointerType === 'touch'; }, { passive: true });
+
 map.on('click', (e) => {
   const drawMode = draw.getMode();
   if (drawMode && drawMode.startsWith('draw_')) return; // let the active digitizing tool handle this click
@@ -276,7 +330,8 @@ map.on('click', (e) => {
   const visibleLayerIds = state.layers.filter(l => l.visible).flatMap(l => [`${l.id}-fill`, `${l.id}-outline`, `${l.id}-point`, `${l.id}-point-photo`]);
   if (!visibleLayerIds.length) return;
 
-  const bbox = [[e.point.x - 5, e.point.y - 5], [e.point.x + 5, e.point.y + 5]];
+  const tolerance = lastPointerWasTouch ? 14 : 5;
+  const bbox = [[e.point.x - tolerance, e.point.y - tolerance], [e.point.x + tolerance, e.point.y + tolerance]];
   const features = map.queryRenderedFeatures(bbox, { layers: visibleLayerIds });
   if (!features.length) return;
 
@@ -294,10 +349,17 @@ map.on('click', (e) => {
   });
   html += '</table>';
   if (photoUrl) {
-    html += `<div class="popup-photo-container"><img src="${photoUrl}" alt="Attached photo" title="Click to view full size" onclick="window.open('${photoUrl}', '_blank')" /></div>`;
+    // No inline onclick / data URL embedded twice — the click is wired up
+    // below via addEventListener once the popup element actually exists.
+    html += `<div class="popup-photo-container"><img alt="Attached photo" title="Tap to view full size" /></div>`;
   }
 
   activePopup.setLngLat(e.lngLat).setHTML(html).addTo(map);
+
+  if (photoUrl) {
+    const imgEl = activePopup.getElement().querySelector('.popup-photo-container img');
+    if (imgEl) { imgEl.src = photoUrl; imgEl.addEventListener('click', () => openImageLightbox(photoUrl)); }
+  }
 });
 
 map.on('draw.modechange', (e) => {
@@ -341,6 +403,11 @@ map.on('draw.selectionchange', (e) => {
 async function guardEditAction() {
   if (!state.activeLayerId) {
     await modalAlert('No active layer', 'Select or create a layer in the Layers tab first.');
+    return false;
+  }
+  const activeLayer = state.layers.find(l => l.id === state.activeLayerId);
+  if (activeLayer && !activeLayer.visible) {
+    await modalAlert('Layer hidden', 'This layer is hidden. Show it (the eye button) before editing it.');
     return false;
   }
   if (!state.isEditModeActive) {
@@ -776,6 +843,9 @@ async function handleFile(file) {
       const text = await file.text();
       addLayer(baseName(name), JSON.parse(text));
       setStatus(`Loaded ${name}`, 'ok');
+    } else if (ext === 'tif' || ext === 'tiff') {
+      await loadGeoTiffRaster(file);
+      setStatus(`Loaded ${name}`, 'ok');
     } else {
       setStatus(`Unsupported file type: .${ext}`, 'error');
     }
@@ -786,6 +856,104 @@ async function handleFile(file) {
   }
 }
 function baseName(filename) { return filename.replace(/\.[^/.]+$/, ''); }
+
+/* -----------------------------------------------------------
+   GeoTIFF import — parsed with geotiff.js, drawn to a canvas, and
+   placed as a MapLibre image source. Only correctly placed when the
+   file's embedded CRS is geographic WGS84 (EPSG:4326); this app does
+   not reproject rasters, matching the same honesty-over-false-
+   precision approach as the GeoTIFF export above.
+----------------------------------------------------------- */
+async function loadGeoTiffRaster(file) {
+  const tiff = await GeoTIFF.fromBlob(file);
+  const image = await tiff.getImage();
+  const width = image.getWidth();
+  const height = image.getHeight();
+  const bbox = image.getBoundingBox(); // [minX, minY, maxX, maxY]
+
+  const geoKeys = image.getGeoKeys ? image.getGeoKeys() : {};
+  const epsg = geoKeys.ProjectedCSTypeGeoKey || geoKeys.GeographicTypeGeoKey;
+  if (epsg && epsg !== 4326) {
+    const proceed = await modalConfirm(
+      'Raster is not WGS84',
+      `This GeoTIFF's embedded CRS is EPSG:${epsg}, not WGS84 (EPSG:4326). This app does not reproject rasters, so the image will most likely be placed in the wrong location. Reproject it to EPSG:4326 in QGIS first for accurate placement.`,
+      { confirmLabel: 'Load anyway', danger: true }
+    );
+    if (!proceed) return;
+  }
+
+  const samplesPerPixel = image.getSamplesPerPixel();
+  const rasters = await image.readRasters({ interleave: true });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(width, height);
+  for (let i = 0, p = 0; i < width * height; i++, p += samplesPerPixel) {
+    const o = i * 4;
+    imgData.data[o] = rasters[p];
+    imgData.data[o + 1] = samplesPerPixel > 1 ? rasters[p + 1] : rasters[p];
+    imgData.data[o + 2] = samplesPerPixel > 2 ? rasters[p + 2] : rasters[p];
+    imgData.data[o + 3] = samplesPerPixel > 3 ? rasters[p + 3] : 255;
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  const [minX, minY, maxX, maxY] = bbox;
+  const sourceId = 'raster_' + Math.random().toString(36).substr(2, 8);
+  map.addSource(sourceId, {
+    type: 'image', url: canvas.toDataURL('image/png'),
+    coordinates: [[minX, maxY], [maxX, maxY], [maxX, minY], [minX, minY]],
+  });
+  map.addLayer({ id: `${sourceId}-layer`, type: 'raster', source: sourceId, paint: { 'raster-opacity': 1 } });
+
+  state.rasterLayers.push({ id: sourceId, name: baseName(file.name), visible: true, bounds: [minX, minY, maxX, maxY] });
+  renderRasterLayerList();
+  map.fitBounds([[minX, minY], [maxX, maxY]], { padding: 40, duration: 400 });
+}
+
+function renderRasterLayerList() {
+  if (!state.rasterLayers.length) {
+    els.rasterLayerList.innerHTML = '<p class="empty">No raster layers loaded.</p>';
+    return;
+  }
+  els.rasterLayerList.innerHTML = state.rasterLayers.map(r => `
+    <div class="layer-row${!r.visible ? ' hidden-layer' : ''}" data-raster-id="${r.id}" role="listitem">
+      <span class="swatch" style="background:var(--ih-text-muted)"></span>
+      <span class="name" title="${r.name}">${r.name}</span>
+      <span class="actions">
+        <button data-action="vis" title="Toggle visibility">${r.visible ? ICON_EYE_OPEN : ICON_EYE_CLOSED}</button>
+        <button data-action="zoom" title="Zoom to raster">${ICON_ZOOM}</button>
+        <button data-action="del" class="del" title="Remove raster">${ICON_DELETE}</button>
+      </span>
+    </div>`).join('');
+}
+
+els.rasterLayerList.addEventListener('click', (e) => {
+  const actionEl = e.target.closest('[data-action]');
+  const row = e.target.closest('.layer-row');
+  if (!actionEl || !row) return;
+  const raster = state.rasterLayers.find(r => r.id === row.dataset.rasterId);
+  if (!raster) return;
+
+  switch (actionEl.dataset.action) {
+    case 'vis':
+      raster.visible = !raster.visible;
+      if (map.getLayer(`${raster.id}-layer`)) map.setLayoutProperty(`${raster.id}-layer`, 'visibility', raster.visible ? 'visible' : 'none');
+      renderRasterLayerList();
+      break;
+    case 'zoom': {
+      const [minX, minY, maxX, maxY] = raster.bounds;
+      map.fitBounds([[minX, minY], [maxX, maxY]], { padding: 40, duration: 400 });
+      break;
+    }
+    case 'del':
+      if (map.getLayer(`${raster.id}-layer`)) map.removeLayer(`${raster.id}-layer`);
+      if (map.getSource(raster.id)) map.removeSource(raster.id);
+      state.rasterLayers = state.rasterLayers.filter(r => r.id !== raster.id);
+      renderRasterLayerList();
+      break;
+  }
+});
 
 let _sqlJsPromise = null;
 function getSqlJs() {
@@ -888,9 +1056,11 @@ function addLayer(name, geojson) {
     if (!f.properties._gis_id) f.properties._gis_id = `feat_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 4)}`;
   });
 
+  const seedColor = nextColor();
   const layer = {
     id: 'layer_' + Math.random().toString(36).substr(2, 8),
-    name, color: nextColor(), width: 2, opacity: 0.3, labelField: '', visible: true, data: geojson,
+    name, color: seedColor, pointColor: seedColor, lineColor: seedColor, fillColor: seedColor,
+    width: 2, opacity: 0.3, labelField: '', visible: true, data: geojson,
   };
 
   state.layers.unshift(layer);
@@ -920,9 +1090,9 @@ function renderLayerOnMap(layer) {
 
   map.addSource(layer.id, { type: 'geojson', data: layer.data });
 
-  map.addLayer({ id: `${layer.id}-fill`, type: 'fill', source: layer.id, filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': layer.color, 'fill-opacity': layer.opacity } });
-  map.addLayer({ id: `${layer.id}-outline`, type: 'line', source: layer.id, filter: ['in', ['geometry-type'], ['literal', ['Polygon', 'LineString']]], paint: { 'line-color': layer.color, 'line-width': layer.width } });
-  map.addLayer({ id: `${layer.id}-point`, type: 'circle', source: layer.id, filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['coalesce', ['get', 'photo'], ''], '']], paint: { 'circle-color': layer.color, 'circle-radius': parseFloat(layer.width) + 3, 'circle-stroke-width': 1, 'circle-stroke-color': '#0E1520' } });
+  map.addLayer({ id: `${layer.id}-fill`, type: 'fill', source: layer.id, filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': layer.fillColor, 'fill-opacity': layer.opacity } });
+  map.addLayer({ id: `${layer.id}-outline`, type: 'line', source: layer.id, filter: ['in', ['geometry-type'], ['literal', ['Polygon', 'LineString']]], paint: { 'line-color': layer.lineColor, 'line-width': layer.width } });
+  map.addLayer({ id: `${layer.id}-point`, type: 'circle', source: layer.id, filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['coalesce', ['get', 'photo'], ''], '']], paint: { 'circle-color': layer.pointColor, 'circle-radius': parseFloat(layer.width) + 3, 'circle-stroke-width': 1, 'circle-stroke-color': '#0E1520' } });
   map.addLayer({ id: `${layer.id}-point-photo`, type: 'circle', source: layer.id, filter: ['all', ['==', ['geometry-type'], 'Point'], ['!=', ['coalesce', ['get', 'photo'], ''], '']], paint: { 'circle-color': '#D87822', 'circle-radius': parseFloat(layer.width) + 5, 'circle-stroke-width': 2, 'circle-stroke-color': '#ffffff' } });
   map.addLayer({ id: `${layer.id}-label`, type: 'symbol', source: layer.id, layout: {
     'text-field': layer.labelField ? ['get', layer.labelField] : '',
@@ -947,15 +1117,15 @@ function setLayerMapVisibility(layer, visible) {
 
 function updateLayerStyles(layer) {
   if (map.getLayer(`${layer.id}-fill`)) {
-    map.setPaintProperty(`${layer.id}-fill`, 'fill-color', layer.color);
+    map.setPaintProperty(`${layer.id}-fill`, 'fill-color', layer.fillColor);
     map.setPaintProperty(`${layer.id}-fill`, 'fill-opacity', parseFloat(layer.opacity));
   }
   if (map.getLayer(`${layer.id}-outline`)) {
-    map.setPaintProperty(`${layer.id}-outline`, 'line-color', layer.color);
+    map.setPaintProperty(`${layer.id}-outline`, 'line-color', layer.lineColor);
     map.setPaintProperty(`${layer.id}-outline`, 'line-width', parseFloat(layer.width));
   }
   if (map.getLayer(`${layer.id}-point`)) {
-    map.setPaintProperty(`${layer.id}-point`, 'circle-color', layer.color);
+    map.setPaintProperty(`${layer.id}-point`, 'circle-color', layer.pointColor);
     map.setPaintProperty(`${layer.id}-point`, 'circle-radius', parseFloat(layer.width) + 3);
   }
   if (map.getLayer(`${layer.id}-point-photo`)) map.setPaintProperty(`${layer.id}-point-photo`, 'circle-radius', parseFloat(layer.width) + 5);
@@ -975,7 +1145,6 @@ function setActiveLayer(id) {
     els.stylePanel.hidden = true;
     els.styleEmptyState.hidden = false;
     updateTableVisibility(false);
-    els.expGeoPackage.disabled = true;
     state.currentDrawMode = null;
     state.isEditModeActive = false;
     return;
@@ -984,13 +1153,16 @@ function setActiveLayer(id) {
   els.drawToolbar.hidden = false;
   els.stylePanel.hidden = false;
   els.styleEmptyState.hidden = true;
-  els.expGeoPackage.disabled = false;
 
-  els.styleColor.value = layer.color;
+  els.stylePointColor.value = layer.pointColor;
+  els.styleLineColor.value = layer.lineColor;
+  els.styleFillColor.value = layer.fillColor;
   els.styleWidth.value = layer.width;
   els.styleOpacity.value = layer.opacity;
 
-  draw.set(layer.data);
+  // A hidden layer should not appear in the Draw overlay (which renders
+  // independently of our own visibility toggle) or be editable until shown.
+  draw.set(layer.visible ? layer.data : { type: 'FeatureCollection', features: [] });
   if (!state.isEditModeActive) draw.changeMode('simple_select');
 
   const fields = getLayerFields(layer);
@@ -1024,7 +1196,11 @@ function renderLayerList() {
     const isEditing = isThisActive && state.isEditModeActive;
     return `
       <div class="layer-row${isThisActive ? ' active' : ''}${!layer.visible ? ' hidden-layer' : ''}" data-layer-id="${layer.id}" role="listitem">
-        <span class="swatch" style="background:${layer.color}"></span>
+        <span class="swatch-group" title="Point / line / fill colour">
+          <span style="background:${layer.pointColor}"></span>
+          <span style="background:${layer.lineColor}"></span>
+          <span style="background:${layer.fillColor}"></span>
+        </span>
         <span class="name" data-action="select" title="${layer.name}">${layer.name}</span>
         <span class="actions">
           <button data-action="up" title="Move up" ${idx === 0 ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
@@ -1032,11 +1208,10 @@ function renderLayerList() {
           <button data-action="edit" class="edit-btn${isEditing ? ' is-editing' : ''}" title="${isEditing ? 'Lock editing' : 'Unlock editing'}">
             ${isEditing ? '<svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>'}
           </button>
-          <button data-action="vis" title="Toggle visibility">
-            ${layer.visible ? '<svg viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 10.6a3 3 0 0 0 4.2 4.2M9.9 5.1A11 11 0 0 1 12 5c7 0 11 7 11 7a13.5 13.5 0 0 1-3.1 3.8M6.6 6.6A13.4 13.4 0 0 0 1 12s4 7 11 7a10.4 10.4 0 0 0 5.4-1.5"/></svg>'}
-          </button>
-          <button data-action="zoom" title="Zoom to layer"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
-          <button data-action="del" class="del" title="Delete layer"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M6 18L18 6"/></svg></button>
+          <button data-action="vis" title="Toggle visibility">${layer.visible ? ICON_EYE_OPEN : ICON_EYE_CLOSED}</button>
+          <button data-action="zoom" title="Zoom to layer">${ICON_ZOOM}</button>
+          <button data-action="export" title="Export this layer to GeoPackage">${ICON_DOWNLOAD}</button>
+          <button data-action="del" class="del" title="Delete layer">${ICON_DELETE}</button>
         </span>
       </div>`;
   }).join('');
@@ -1068,9 +1243,18 @@ els.layerList.addEventListener('click', (e) => {
     case 'vis':
       layer.visible = !layer.visible;
       setLayerMapVisibility(layer, layer.visible);
+      // The Draw plugin renders the active layer's geometry through its own
+      // layers, independent of our visibility toggle above — clear or
+      // restore that overlay explicitly so a hidden layer actually disappears
+      // (and stops being editable) instead of staying visible/editable.
+      if (layer.id === state.activeLayerId) {
+        if (layer.visible) { draw.set(layer.data); if (!state.isEditModeActive) draw.changeMode('simple_select'); }
+        else { draw.deleteAll(); }
+      }
       renderLayerList();
       break;
     case 'zoom': fitToLayer(layer); break;
+    case 'export': exportGeoPackage(layer); break;
     case 'del': removeLayer(id); break;
   }
 });
@@ -1094,7 +1278,9 @@ function fitToLayer(layer) {
   } catch (err) { console.warn('fitToLayer failed:', err); }
 }
 
-els.styleColor.addEventListener('input', e => { const l = state.layers.find(x => x.id === state.activeLayerId); if (l) { l.color = e.target.value; updateLayerStyles(l); renderLayerList(); } });
+els.stylePointColor.addEventListener('input', e => { const l = state.layers.find(x => x.id === state.activeLayerId); if (l) { l.pointColor = e.target.value; updateLayerStyles(l); renderLayerList(); } });
+els.styleLineColor.addEventListener('input', e => { const l = state.layers.find(x => x.id === state.activeLayerId); if (l) { l.lineColor = e.target.value; updateLayerStyles(l); renderLayerList(); } });
+els.styleFillColor.addEventListener('input', e => { const l = state.layers.find(x => x.id === state.activeLayerId); if (l) { l.fillColor = e.target.value; updateLayerStyles(l); renderLayerList(); } });
 els.styleWidth.addEventListener('input', e => { const l = state.layers.find(x => x.id === state.activeLayerId); if (l) { l.width = e.target.value; updateLayerStyles(l); } });
 els.styleOpacity.addEventListener('input', e => { const l = state.layers.find(x => x.id === state.activeLayerId); if (l) { l.opacity = e.target.value; updateLayerStyles(l); } });
 els.labelField.addEventListener('change', e => { const l = state.layers.find(x => x.id === state.activeLayerId); if (l) { l.labelField = e.target.value; updateLayerStyles(l); } });
@@ -1188,10 +1374,10 @@ els.closeTableBtn.addEventListener('click', () => updateTableVisibility(false));
 els.toggleTableBtn.addEventListener('click', () => updateTableVisibility(!state.isTableVisible));
 
 /* -----------------------------------------------------------
-   GeoPackage export
+   GeoPackage export — called per-row from the Layers tab, so which
+   layer is being exported is always explicit rather than implied by
+   whichever layer happens to be "active".
 ----------------------------------------------------------- */
-els.expGeoPackage.addEventListener('click', exportGeoPackage);
-
 function geoJsonToWKB(geometry) {
   const buffer = new ArrayBuffer(1024 * 64);
   const view = new DataView(buffer);
@@ -1217,8 +1403,7 @@ function buildGpkgHeaderBlob(wkbBytes) {
   return header;
 }
 
-async function exportGeoPackage() {
-  const layer = state.layers.find(l => l.id === state.activeLayerId);
+async function exportGeoPackage(layer) {
   if (!layer) return;
 
   try {
@@ -1270,22 +1455,25 @@ async function exportGeoPackage() {
 
 /* Initial render */
 renderLayerList();
+renderRasterLayerList();
 updateStatusLayerCount();
 
 /* -----------------------------------------------------------
    Project save / open — layers, symbology, basemap, and view
    as a single portable .webgis.json file (no browser storage).
+   Note: vector layers only — raster (GeoTIFF) layers are not yet
+   included in project files.
 ----------------------------------------------------------- */
 function buildProjectPayload() {
   return {
-    format: 'webgis-studio-project',
+    format: 'webgis-project',
     appVersion: APP_VERSION,
     savedAt: new Date().toISOString(),
     basemap: state.basemapKey,
     view: { center: map.getCenter().toArray(), zoom: map.getZoom() },
     layers: state.layers.map(l => ({
-      name: l.name, color: l.color, width: l.width, opacity: l.opacity,
-      labelField: l.labelField, visible: l.visible, data: l.data
+      name: l.name, color: l.color, pointColor: l.pointColor, lineColor: l.lineColor, fillColor: l.fillColor,
+      width: l.width, opacity: l.opacity, labelField: l.labelField, visible: l.visible, data: l.data
     }))
   };
 }
@@ -1310,8 +1498,8 @@ els.projectInput.addEventListener('change', async (e) => {
   try {
     const text = await file.text();
     const payload = JSON.parse(text);
-    if (payload.format !== 'webgis-studio-project' || !Array.isArray(payload.layers)) {
-      throw new Error('This file is not a recognised WebGIS Studio project.');
+    if (!['webgis-project', 'webgis-studio-project'].includes(payload.format) || !Array.isArray(payload.layers)) {
+      throw new Error('This file is not a recognised WebGIS project.');
     }
 
     if (state.layers.length) {
@@ -1335,7 +1523,9 @@ function loadProjectData(payload) {
 
   state.layers = payload.layers.map(saved => ({
     id: 'layer_' + Math.random().toString(36).substr(2, 8),
-    name: saved.name, color: saved.color, width: saved.width, opacity: saved.opacity,
+    name: saved.name, color: saved.color,
+    pointColor: saved.pointColor || saved.color, lineColor: saved.lineColor || saved.color, fillColor: saved.fillColor || saved.color,
+    width: saved.width, opacity: saved.opacity,
     labelField: saved.labelField || '', visible: saved.visible !== false, data: saved.data
   }));
 
