@@ -2,7 +2,7 @@
    WebGIS Studio — Main Application Script
    =========================================================== */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '2.0.0';
 const APP_NAME = 'WebGIS Studio';
 console.log(`%c${APP_NAME} v${APP_VERSION}`, 'font-weight:600;color:#24529A;');
 
@@ -270,7 +270,8 @@ map.addControl(draw);
 const activePopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true });
 
 map.on('click', (e) => {
-  if (state.isEditModeActive) return;
+  const drawMode = draw.getMode();
+  if (drawMode && drawMode.startsWith('draw_')) return; // let the active digitizing tool handle this click
 
   const visibleLayerIds = state.layers.filter(l => l.visible).flatMap(l => [`${l.id}-fill`, `${l.id}-outline`, `${l.id}-point`, `${l.id}-point-photo`]);
   if (!visibleLayerIds.length) return;
@@ -303,6 +304,10 @@ map.on('draw.modechange', (e) => {
   document.querySelectorAll('.map-tool-btn').forEach(b => b.classList.remove('is-active'));
   const modeToBtn = { draw_point: els.drawPointBtn, draw_line_string: els.drawLineBtn, draw_polygon: els.drawPolyBtn };
   modeToBtn[e.mode]?.classList.add('is-active');
+
+  // Crosshair while actively placing vertices; plain arrow the rest of the time
+  // (overrides MapLibre's own grab/grabbing pan cursor — see style.css).
+  map.getCanvasContainer().classList.toggle('mode-drawing', e.mode.startsWith('draw_'));
 });
 
 function syncDrawToActiveLayer() {
@@ -356,6 +361,8 @@ els.newLayerBtn.addEventListener('click', async () => {
   const name = await modalPrompt('New scratch layer', 'Name the new layer.', suggested);
   if (name === null) return;
   addLayer(name || suggested, { type: 'FeatureCollection', features: [] });
+  state.isEditModeActive = true; // a freshly created scratch layer is meant to be drawn into immediately
+  renderLayerList();
   switchToTab('style');
 });
 
@@ -385,26 +392,45 @@ els.recordGpsBtn.addEventListener('click', async () => {
 
   setStatus('Fetching GPS position (trying high accuracy)…');
 
-  const fetchPosition = (highAccuracy) => {
+  // Three-stage fallback: fresh high-accuracy GPS fix -> fresh standard-accuracy
+  // fix (usually Wi-Fi/cell positioning) -> a cached "approximate" position up
+  // to 5 minutes old, which succeeds even when a fresh fix keeps timing out.
+  const STAGES = [
+    { enableHighAccuracy: true, timeout: 8000, maximumAge: 0, label: 'high-accuracy GPS' },
+    { enableHighAccuracy: false, timeout: 15000, maximumAge: 0, label: 'standard-accuracy' },
+    { enableHighAccuracy: false, timeout: 20000, maximumAge: 300000, label: 'approximate (cached)' },
+  ];
+
+  const fetchPosition = (stageIndex) => {
+    const stage = STAGES[stageIndex];
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         setStatus('');
         const { longitude: lng, latitude: lat, accuracy } = position.coords;
-        const takePhoto = await modalConfirm('Attach a photo?', `Accuracy: ~${Math.round(accuracy)}m. Attach or capture a photo for this point?`, { confirmLabel: 'Add photo', cancelLabel: 'Skip' });
+        const approxNote = stage.maximumAge > 0 ? ' (approximate — using a recent cached fix)' : '';
+        const takePhoto = await modalConfirm('Attach a photo?', `Accuracy: ~${Math.round(accuracy)}m${approxNote}. Attach or capture a photo for this point?`, { confirmLabel: 'Add photo', cancelLabel: 'Skip' });
         if (takePhoto) {
           triggerPhotoCapture((photoDataUrl) => completeRecordPoint(activeLayer, lng, lat, accuracy, photoDataUrl));
         } else {
           completeRecordPoint(activeLayer, lng, lat, accuracy, '');
         }
       },
-      (err) => {
-        if (highAccuracy) { setStatus('High accuracy timed out. Retrying with standard location…'); fetchPosition(false); }
-        else { setStatus(`GPS error: ${err.message}`, 'error'); }
+      async (err) => {
+        if (stageIndex < STAGES.length - 1) {
+          setStatus(`${stage.label} location timed out. Trying ${STAGES[stageIndex + 1].label} location…`);
+          fetchPosition(stageIndex + 1);
+        } else {
+          setStatus('GPS unavailable.', 'error');
+          await modalAlert(
+            'Could not determine location',
+            'Every location attempt failed or timed out. This is usually one of: Location Services turned off at the OS level, this site denied location permission in the browser, or (on a laptop/desktop without GPS hardware) a slow Wi-Fi-based position lookup. Check your device and browser location settings and try again.'
+          );
+        }
       },
-      { enableHighAccuracy: highAccuracy, timeout: highAccuracy ? 6000 : 15000, maximumAge: 0 }
+      stage
     );
   };
-  fetchPosition(true);
+  fetchPosition(0);
 });
 
 function triggerPhotoCapture(callback) {
@@ -557,7 +583,8 @@ function printMapToPdf() {
       pdf.rect(frameX, footerY, frameWidth, footerHeight, 'F');
 
       const activeLayer = state.layers.find(l => l.id === state.activeLayerId);
-      const mapTitle = activeLayer ? `MAP SHEET: ${activeLayer.name.toUpperCase()}` : 'WEBGIS SPATIAL REPORT';
+      const titleFieldValue = document.getElementById('mapTitleInput').value.trim();
+      const mapTitle = titleFieldValue || (activeLayer ? `MAP SHEET: ${activeLayer.name.toUpperCase()}` : 'WEBGIS SPATIAL REPORT');
       const centerCoord = map.getCenter();
       const zoomLevel = map.getZoom().toFixed(1);
       const dateStr = new Date().toISOString().split('T')[0];
@@ -587,6 +614,139 @@ function printMapToPdf() {
   }
 }
 els.printPdfBtn?.addEventListener('click', printMapToPdf);
+
+/* -----------------------------------------------------------
+   JPG export — plain raster snapshot of the current view.
+----------------------------------------------------------- */
+function safeExportName() {
+  const title = document.getElementById('mapTitleInput').value.trim();
+  return (title || 'webgis_map').replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+document.getElementById('expJpg').addEventListener('click', () => {
+  try {
+    map.triggerRepaint();
+    setTimeout(() => {
+      const dataUrl = map.getCanvas().toDataURL('image/jpeg', 0.92);
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = `${safeExportName()}.jpg`;
+      a.click();
+      setStatus('Exported JPG image.', 'ok');
+    }, 200);
+  } catch (err) {
+    console.error(err);
+    setStatus(`JPG export failed: ${err.message}`, 'error');
+  }
+});
+
+/* -----------------------------------------------------------
+   GeoTIFF export — minimal, hand-written baseline TIFF + GeoTIFF
+   tags (uncompressed RGB, single strip, WGS84 geographic tiepoint).
+   This assigns a LINEAR degrees-per-pixel scale across the current
+   viewport's N/S/E/W bounds. That is a simplification, not a true
+   reprojection from the map's Web Mercator projection — accurate
+   enough for small/moderate extents, but it will skew at high
+   latitudes or wide zoomed-out views. It is a standard lightweight
+   technique (equivalent to a PNG + world file) and opens correctly
+   as a georeferenced raster in QGIS and GDAL-based tools.
+----------------------------------------------------------- */
+function buildGeoTiff(imageData, width, height, bounds) {
+  const { west, south, east, north } = bounds;
+  const scaleX = (east - west) / width;
+  const scaleY = (north - south) / height;
+
+  const pixelDataOffset = 332;
+  const pixelByteCount = width * height * 3;
+  const buffer = new ArrayBuffer(pixelDataOffset + pixelByteCount);
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+
+  // Header
+  bytes[0] = 0x49; bytes[1] = 0x49; // 'II' little-endian
+  view.setUint16(2, 42, true);
+  view.setUint32(4, 8, true); // offset to IFD
+
+  // IFD (16 entries)
+  const TAGS = [
+    [256, 4, 1, width],                 // ImageWidth
+    [257, 4, 1, height],                // ImageLength
+    [258, 3, 3, 206],                   // BitsPerSample -> external
+    [259, 3, 1, 1],                     // Compression: none
+    [262, 3, 1, 2],                     // PhotometricInterpretation: RGB
+    [273, 4, 1, pixelDataOffset],       // StripOffsets
+    [277, 3, 1, 3],                     // SamplesPerPixel
+    [278, 4, 1, height],                // RowsPerStrip
+    [279, 4, 1, pixelByteCount],        // StripByteCounts
+    [282, 5, 1, 212],                   // XResolution -> external
+    [283, 5, 1, 220],                   // YResolution -> external
+    [284, 3, 1, 1],                     // PlanarConfiguration: chunky
+    [296, 3, 1, 2],                     // ResolutionUnit: inch
+    [33550, 12, 3, 228],                // ModelPixelScaleTag -> external
+    [33922, 12, 6, 252],                // ModelTiepointTag -> external
+    [34735, 3, 16, 300],                // GeoKeyDirectoryTag -> external
+  ];
+
+  let pos = 8;
+  view.setUint16(pos, TAGS.length, true); pos += 2;
+  for (const [tag, type, count, value] of TAGS) {
+    view.setUint16(pos, tag, true); pos += 2;
+    view.setUint16(pos, type, true); pos += 2;
+    view.setUint32(pos, count, true); pos += 4;
+    if (type === 3 && count === 1) { view.setUint16(pos, value, true); view.setUint16(pos + 2, 0, true); }
+    else view.setUint32(pos, value, true);
+    pos += 4;
+  }
+  view.setUint32(pos, 0, true); pos += 4; // no next IFD
+
+  // External value blocks (offsets must match the TAGS table above)
+  view.setUint16(206, 8, true); view.setUint16(208, 8, true); view.setUint16(210, 8, true); // BitsPerSample
+  view.setUint32(212, 72, true); view.setUint32(216, 1, true); // XResolution 72/1
+  view.setUint32(220, 72, true); view.setUint32(224, 1, true); // YResolution 72/1
+  view.setFloat64(228, scaleX, true); view.setFloat64(236, scaleY, true); view.setFloat64(244, 0, true); // ModelPixelScale
+  view.setFloat64(252, 0, true); view.setFloat64(260, 0, true); view.setFloat64(268, 0, true);
+  view.setFloat64(276, west, true); view.setFloat64(284, north, true); view.setFloat64(292, 0, true); // ModelTiepoint (raster 0,0 -> west,north)
+  // GeoKeyDirectory: header + GTModelTypeGeoKey(Geographic) + GTRasterTypeGeoKey(Area) + GeographicTypeGeoKey(WGS84)
+  const geoKeys = [1, 1, 0, 3, 1024, 0, 1, 2, 1025, 0, 1, 1, 2048, 0, 1, 4326];
+  geoKeys.forEach((v, i) => view.setUint16(300 + i * 2, v, true));
+
+  // Pixel data: RGBA canvas -> RGB, row order preserved (row 0 = north edge, matching the tiepoint)
+  for (let i = 0, p = pixelDataOffset; i < imageData.length; i += 4, p += 3) {
+    bytes[p] = imageData[i]; bytes[p + 1] = imageData[i + 1]; bytes[p + 2] = imageData[i + 2];
+  }
+
+  return new Blob([buffer], { type: 'image/tiff' });
+}
+
+document.getElementById('expGeoTiff').addEventListener('click', async () => {
+  try {
+    map.triggerRepaint();
+    await new Promise(r => setTimeout(r, 200));
+
+    const canvas = map.getCanvas();
+    const width = canvas.width, height = canvas.height;
+    const ctx = canvas.getContext('webgl') ? null : canvas.getContext('2d');
+    // MapLibre's canvas is WebGL-backed; read pixels via a 2D copy canvas.
+    const copy = document.createElement('canvas');
+    copy.width = width; copy.height = height;
+    copy.getContext('2d').drawImage(canvas, 0, 0);
+    const imageData = copy.getContext('2d').getImageData(0, 0, width, height).data;
+
+    const b = map.getBounds();
+    const bounds = { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() };
+
+    const blob = buildGeoTiff(imageData, width, height, bounds);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${safeExportName()}.tif`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus('Exported GeoTIFF (WGS84 linear tiepoint).', 'ok');
+  } catch (err) {
+    console.error(err);
+    setStatus(`GeoTIFF export failed: ${err.message}`, 'error');
+  }
+});
 
 /* -----------------------------------------------------------
    File loading
@@ -736,7 +896,6 @@ function addLayer(name, geojson) {
   state.layers.unshift(layer);
   renderLayerOnMap(layer);
   setActiveLayer(layer.id);
-  state.isEditModeActive = true;
   if (layer.data.features.length) fitToLayer(layer);
   updateStatusLayerCount();
   return layer;
@@ -765,7 +924,15 @@ function renderLayerOnMap(layer) {
   map.addLayer({ id: `${layer.id}-outline`, type: 'line', source: layer.id, filter: ['in', ['geometry-type'], ['literal', ['Polygon', 'LineString']]], paint: { 'line-color': layer.color, 'line-width': layer.width } });
   map.addLayer({ id: `${layer.id}-point`, type: 'circle', source: layer.id, filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['coalesce', ['get', 'photo'], ''], '']], paint: { 'circle-color': layer.color, 'circle-radius': parseFloat(layer.width) + 3, 'circle-stroke-width': 1, 'circle-stroke-color': '#0E1520' } });
   map.addLayer({ id: `${layer.id}-point-photo`, type: 'circle', source: layer.id, filter: ['all', ['==', ['geometry-type'], 'Point'], ['!=', ['coalesce', ['get', 'photo'], ''], '']], paint: { 'circle-color': '#D87822', 'circle-radius': parseFloat(layer.width) + 5, 'circle-stroke-width': 2, 'circle-stroke-color': '#ffffff' } });
-  map.addLayer({ id: `${layer.id}-label`, type: 'symbol', source: layer.id, layout: { 'text-field': layer.labelField ? ['get', layer.labelField] : '', 'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'], 'text-size': 12, 'text-anchor': 'center' }, paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1.5 } });
+  map.addLayer({ id: `${layer.id}-label`, type: 'symbol', source: layer.id, layout: {
+    'text-field': layer.labelField ? ['get', layer.labelField] : '',
+    'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+    'text-size': 12,
+    // Points: offset the label clear of the marker instead of centring text on
+    // top of it. Lines/polygons: keep the label centred on the feature as before.
+    'text-anchor': ['case', ['==', ['geometry-type'], 'Point'], 'top', 'center'],
+    'text-offset': ['case', ['==', ['geometry-type'], 'Point'], ['literal', [0, 0.9]], ['literal', [0, 0]]],
+  }, paint: { 'text-color': '#ffffff', 'text-halo-color': '#000000', 'text-halo-width': 1.5 } });
 
   setLayerMapVisibility(layer, layer.visible);
   updateMapLayerOrder();
@@ -863,7 +1030,7 @@ function renderLayerList() {
           <button data-action="up" title="Move up" ${idx === 0 ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
           <button data-action="down" title="Move down" ${idx === state.layers.length - 1 ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
           <button data-action="edit" class="edit-btn${isEditing ? ' is-editing' : ''}" title="${isEditing ? 'Lock editing' : 'Unlock editing'}">
-            ${isEditing ? '<svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>' : '<svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>'}
+            ${isEditing ? '<svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>'}
           </button>
           <button data-action="vis" title="Toggle visibility">
             ${layer.visible ? '<svg viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 10.6a3 3 0 0 0 4.2 4.2M9.9 5.1A11 11 0 0 1 12 5c7 0 11 7 11 7a13.5 13.5 0 0 1-3.1 3.8M6.6 6.6A13.4 13.4 0 0 0 1 12s4 7 11 7a10.4 10.4 0 0 0 5.4-1.5"/></svg>'}
