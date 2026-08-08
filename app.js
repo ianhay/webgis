@@ -2,7 +2,7 @@
    WebGIS Studio — Main Application Script
    =========================================================== */
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const APP_NAME = 'WebGIS Studio';
 console.log(`%c${APP_NAME} v${APP_VERSION}`, 'font-weight:600;color:#24529A;');
 
@@ -16,7 +16,8 @@ const state = {
   selectedFeatureId: null,
   isTableVisible: false,
   currentDrawMode: null,
-  isEditModeActive: false
+  isEditModeActive: false,
+  basemapKey: 'light'
 };
 
 const els = {
@@ -52,6 +53,9 @@ const els = {
   bufferBtn: document.getElementById('bufferBtn'),
   clipBtn: document.getElementById('clipBtn'),
   clipMaskSelect: document.getElementById('clipMaskSelect'),
+  saveProjectBtn: document.getElementById('saveProjectBtn'),
+  openProjectBtn: document.getElementById('openProjectBtn'),
+  projectInput: document.getElementById('projectInput'),
   mobileMenuToggle: document.getElementById('mobileMenuToggle'),
   sidebar: document.getElementById('sidebar'),
   themeToggle: document.getElementById('themeToggle'),
@@ -207,6 +211,7 @@ function switchBasemap(key) {
   map.addSource('basemap-source', { type: 'raster', tiles: cfg.tiles, tileSize: 256, attribution: cfg.attribution });
   map.addLayer({ id: 'basemap-layer', type: 'raster', source: 'basemap-source' }, anchor ? anchor.id : undefined);
 
+  state.basemapKey = key;
   if (els.basemapSelect) els.basemapSelect.value = key;
 }
 if (els.basemapSelect) els.basemapSelect.addEventListener('change', (e) => switchBasemap(e.target.value));
@@ -1099,3 +1104,79 @@ async function exportGeoPackage() {
 /* Initial render */
 renderLayerList();
 updateStatusLayerCount();
+
+/* -----------------------------------------------------------
+   Project save / open — layers, symbology, basemap, and view
+   as a single portable .webgis.json file (no browser storage).
+----------------------------------------------------------- */
+function buildProjectPayload() {
+  return {
+    format: 'webgis-studio-project',
+    appVersion: APP_VERSION,
+    savedAt: new Date().toISOString(),
+    basemap: state.basemapKey,
+    view: { center: map.getCenter().toArray(), zoom: map.getZoom() },
+    layers: state.layers.map(l => ({
+      name: l.name, color: l.color, width: l.width, opacity: l.opacity,
+      labelField: l.labelField, visible: l.visible, data: l.data
+    }))
+  };
+}
+
+els.saveProjectBtn.addEventListener('click', async () => {
+  const name = await modalPrompt('Save project', 'Name this project file.', 'my_project');
+  if (name === null) return;
+  const payload = buildProjectPayload();
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(name || 'my_project').replace(/[^a-zA-Z0-9_-]/g, '_')}.webgis.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  setStatus(`Saved project (${payload.layers.length} layer${payload.layers.length === 1 ? '' : 's'})`, 'ok');
+});
+
+els.openProjectBtn.addEventListener('click', () => els.projectInput.click());
+els.projectInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const payload = JSON.parse(text);
+    if (payload.format !== 'webgis-studio-project' || !Array.isArray(payload.layers)) {
+      throw new Error('This file is not a recognised WebGIS Studio project.');
+    }
+
+    if (state.layers.length) {
+      const proceed = await modalConfirm('Replace current workspace?', 'Opening a project replaces every layer currently loaded. This cannot be undone.', { confirmLabel: 'Replace', danger: true });
+      if (!proceed) { els.projectInput.value = ''; return; }
+    }
+
+    loadProjectData(payload);
+    setStatus(`Opened project: ${file.name}`, 'ok');
+    switchToTab('layers');
+  } catch (err) {
+    console.error(err);
+    setStatus(`Could not open project: ${err.message}`, 'error');
+  } finally {
+    els.projectInput.value = '';
+  }
+});
+
+function loadProjectData(payload) {
+  [...state.layers].forEach(l => removeLayer(l.id));
+
+  state.layers = payload.layers.map(saved => ({
+    id: 'layer_' + Math.random().toString(36).substr(2, 8),
+    name: saved.name, color: saved.color, width: saved.width, opacity: saved.opacity,
+    labelField: saved.labelField || '', visible: saved.visible !== false, data: saved.data
+  }));
+
+  state.layers.forEach(layer => { renderLayerOnMap(layer); setLayerMapVisibility(layer, layer.visible); });
+
+  if (payload.basemap) switchBasemap(payload.basemap);
+  if (payload.view?.center) map.jumpTo({ center: payload.view.center, zoom: payload.view.zoom ?? map.getZoom() });
+
+  setActiveLayer(state.layers[0]?.id || null);
+  updateStatusLayerCount();
+}

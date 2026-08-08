@@ -36,6 +36,7 @@ html[data-theme="dark"], [data-theme='dark']{
 }
 
 *{box-sizing:border-box;}
+[hidden]{display:none !important;}
 html,body{margin:0;height:100%;overflow:hidden;font-family:var(--font-body);background:var(--ih-bg);color:var(--ih-text);}
 button,input,select{font-family:inherit;}
 svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;}
@@ -264,6 +265,7 @@ html[data-theme="light"] .icon-moon{display:block;}
   }
   #sidebar.mobile-open{transform:translateX(0);}
   .mobile-menu-toggle{display:flex;}
+  .map-toolbar{top:60px;left:8px;right:8px;justify-content:flex-start;overflow-x:auto;}
   .table-panel{left:0;}
   .status-bar{left:8px;bottom:64px;font-size:11px;}
   .table-toggle-fab{right:8px;bottom:8px;}
