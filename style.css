@@ -285,7 +285,7 @@ html[data-theme="light"] .icon-moon{display:block;}
   }
   #sidebar.mobile-open{transform:translateX(0);}
   .mobile-menu-toggle{display:flex;}
-  .map-toolbar{top:60px;left:8px;right:8px;justify-content:flex-start;overflow-x:auto;}
+  .map-toolbar{top:60px;left:8px;max-width:calc(100vw - 16px);overflow-x:auto;}
   .table-panel{left:0;}
   .status-bar{left:8px;bottom:64px;font-size:11px;}
   .table-toggle-fab{right:8px;bottom:8px;}

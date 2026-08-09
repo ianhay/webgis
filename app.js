@@ -271,7 +271,13 @@ const map = new maplibregl.Map({
   style: { version: 8, glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf', sources: {}, layers: [] },
   center: [122.5, -20.5],
   zoom: 4,
-  preserveDrawingBuffer: true
+  preserveDrawingBuffer: true,
+  // Default is 3px — too tight for a fingertip, which almost never stays
+  // perfectly still between touchstart/touchend. A tap that drifts a few
+  // pixels gets classified as a drag instead of a click, and our
+  // click-popup handler simply never fires. This is the likely cause of
+  // "popups don't work on mobile" independent of anything else.
+  clickTolerance: 8,
 });
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
@@ -427,8 +433,9 @@ els.newLayerBtn.addEventListener('click', async () => {
   const suggested = `layer_${state.layers.length + 1}`;
   const name = await modalPrompt('New scratch layer', 'Name the new layer.', suggested);
   if (name === null) return;
-  addLayer(name || suggested, { type: 'FeatureCollection', features: [] });
+  const newLayer = addLayer(name || suggested, { type: 'FeatureCollection', features: [] });
   state.isEditModeActive = true; // a freshly created scratch layer is meant to be drawn into immediately
+  draw.set(newLayer.data);
   renderLayerList();
   switchToTab('style');
 });
@@ -452,6 +459,7 @@ els.recordGpsBtn.addEventListener('click', async () => {
       activeLayer = addLayer(layerName, { type: 'FeatureCollection', features: [] });
       state.isEditModeActive = true;
     }
+    if (activeLayer.visible) draw.set(activeLayer.data);
     renderLayerList();
   }
 
@@ -1160,9 +1168,12 @@ function setActiveLayer(id) {
   els.styleWidth.value = layer.width;
   els.styleOpacity.value = layer.opacity;
 
-  // A hidden layer should not appear in the Draw overlay (which renders
-  // independently of our own visibility toggle) or be editable until shown.
-  draw.set(layer.visible ? layer.data : { type: 'FeatureCollection', features: [] });
+  // Draw's own overlay (and its touch handling) should only be present
+  // while a layer is genuinely editable — not merely "selected". Locked
+  // layers are the common case now, so keeping Draw empty for them also
+  // removes a layer of touch-event interference over ordinary map taps.
+  if (layer.visible && state.isEditModeActive) draw.set(layer.data);
+  else draw.deleteAll();
   if (!state.isEditModeActive) draw.changeMode('simple_select');
 
   const fields = getLayerFields(layer);
@@ -1237,18 +1248,18 @@ els.layerList.addEventListener('click', (e) => {
     case 'edit':
       if (id !== state.activeLayerId) { setActiveLayer(id); state.isEditModeActive = true; }
       else { state.isEditModeActive = !state.isEditModeActive; }
+      if (state.isEditModeActive && layer.visible) draw.set(layer.data);
+      else draw.deleteAll();
       if (!state.isEditModeActive) draw.changeMode('simple_select');
       renderLayerList();
       break;
     case 'vis':
       layer.visible = !layer.visible;
       setLayerMapVisibility(layer, layer.visible);
-      // The Draw plugin renders the active layer's geometry through its own
-      // layers, independent of our visibility toggle above — clear or
-      // restore that overlay explicitly so a hidden layer actually disappears
-      // (and stops being editable) instead of staying visible/editable.
+      // Same Draw-overlay guard as setActiveLayer: only give Draw the
+      // geometry back if the layer is both visible AND actually unlocked.
       if (layer.id === state.activeLayerId) {
-        if (layer.visible) { draw.set(layer.data); if (!state.isEditModeActive) draw.changeMode('simple_select'); }
+        if (layer.visible && state.isEditModeActive) { draw.set(layer.data); draw.changeMode('simple_select'); }
         else { draw.deleteAll(); }
       }
       renderLayerList();
